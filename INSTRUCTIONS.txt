@@ -1,0 +1,215 @@
+===============================================================================
+PA Median Score Calculator - Setup and Usage
+===============================================================================
+
+This package writes median KPI scores directly into the Performance Analytics
+(PA) score tables. It bypasses PA's native data collection: you query a source
+table, the code computes the median per indicator (and per breakdown), and it
+upserts the result into the score tables.
+
+Files in this package:
+  - PA_MedianScoreCalculator.js     The Script Include that does the work.
+  - PA_Median_Scheduled_Template.js A recurring run for ONE period (daily/monthly).
+  - PA_Median_Backfill_Template.js  A historical run over a DATE RANGE (daily/monthly).
+
+A note on sys_ids the code uses:
+  Used:     indicator sys_id, breakdown sys_id, breakdown element sys_id.
+  NOT used: breakdown MAPPING record sys_ids (mappings are JS functions here),
+            breakdown EXCLUSION/matrix record sys_ids (exclusions use the
+            breakdown keys you define in the config).
+
+
+-------------------------------------------------------------------------------
+1. PREREQUISITES (create these in PA before touching the code)
+-------------------------------------------------------------------------------
+
+1.1 Indicators (pa_indicators)
+    Create one indicator per KPI you want a median for. You plug each
+    indicator's sys_id into the template (the kpiSysId field).
+    - The indicator's FREQUENCY must match how you run the script. Use a daily
+      indicator for daily runs and a monthly indicator for monthly runs.
+    - The script writes the score itself, so the indicator does not need a
+      working data source of its own. If the indicator also has native PA
+      collection enabled, disable it or make sure its schedule will not run and
+      overwrite the scores this script writes.
+
+1.2 Breakdowns (pa_breakdowns) and their elements
+    For every breakdown you reference in the config:
+    - The breakdown record must exist. Its sys_id goes into the config (sysId).
+    - The breakdown's ELEMENTS (dimension values) must exist, because the code
+      writes the element sys_id onto each score row. Elements are usually
+      produced by running/collecting the breakdown source once.
+    - If you load elements dynamically (elementsLoader), the function must
+      return a map of label -> element sys_id. If you use static elements, you
+      hardcode label -> element sys_id yourself.
+
+1.3 Indicator-to-breakdown association
+    Associate each breakdown with the indicators it applies to (the breakdown
+    relevance / breakdowns related list on the indicator). Without this, the
+    score rows can be written but PA Explorer will not offer the breakdown
+    under that indicator, so it will look like nothing happened.
+
+1.4 Scores table model (system property)
+    The code auto-detects the model from com.snc.pa.new_scores_tables:
+      - 'true'  -> writes to pa_scores_l1 / pa_scores_l2 (new model).
+      - not set -> writes to pa_scores (legacy model).
+    You do not configure this in the code, but you should know which model your
+    instance uses so you verify results in the right table.
+
+1.5 Breakdown mappings (clarification, no records needed)
+    PA's own breakdown-mapping records are NOT used by this approach. The
+    "mappings" in the template are JavaScript functions, one per source (fact)
+    table, that return the element label for a record. You still must define a
+    mapping function for EVERY source table a breakdown is collected from. If a
+    breakdown has no mapping for the table being queried, those records are
+    bucketed as __unclassified__ and written with an empty element, which means
+    they will not show under that breakdown.
+
+1.6 Breakdown matrix exclusions (clarification, no records needed)
+    If you do NOT want a level1/level2 combination written for a particular
+    pair of breakdowns, list that pair in BREAKDOWN_MATRIX_EXCLUSIONS using the
+    breakdown KEYS (for example ['teamBreakdown','fastTrackBreakdown']). Order
+    does not matter. No PA record is involved.
+
+
+-------------------------------------------------------------------------------
+2. INSTALL THE SCRIPT INCLUDE
+-------------------------------------------------------------------------------
+
+2.1 Create a Script Include named PA_MedianScoreCalculator and paste in
+    PA_MedianScoreCalculator.js. Set it to client callable = false.
+
+2.2 Scope:
+    - If you install it in the global scope, the templates call it as
+      new PA_MedianScoreCalculator().
+    - If you install it in a scoped application, prefix the constructor in the
+      templates, for example new x_my_app.PA_MedianScoreCalculator().
+    - Writing to PA score tables from a scoped app can be restricted by
+      cross-scope rules. If inserts/updates fail in a scoped app, run the
+      writer in global scope (or front it with a small global helper). The
+      public code does not call setWorkflow(false), so score writes run any
+      business rules on the score tables normally.
+
+
+-------------------------------------------------------------------------------
+3. FILL IN A TEMPLATE
+-------------------------------------------------------------------------------
+
+Both templates share the same configuration blocks. Replace every placeholder
+in <angle brackets> and every your_* name.
+
+3.1 BREAKDOWNS
+    For each breakdown set:
+      sysId          the pa_breakdowns sys_id.
+      mappings       one function per source table; return the element LABEL.
+      elements OR    static label -> element sys_id, or
+      elementsLoader a function returning label -> element sys_id.
+    IMPORTANT: the label returned by a mapping function must EXACTLY match a key
+    in elements / elementsLoader output. A mismatch resolves to an empty element
+    sys_id and the breakdown score will not display.
+
+3.2 BREAKDOWN_MATRIX_EXCLUSIONS
+    Optional. List breakdown-key pairs you do not want combined.
+
+3.3 EXAMPLE_SCORE_CALCULATOR (optional)
+    By default a score is read straight from a field with parseInt, which means
+    decimals are truncated and non-numeric values become 0. If you need a
+    derived value (for example days between two date/time fields) or decimals,
+    pass a scoreCalculator that returns a number. See Indicator Set B in the
+    templates.
+
+3.4 Indicator list
+    In the RUN block, fill the indicator array(s):
+      kpiSysId    the pa_indicators sys_id.
+      filter      an extra encoded-query fragment for that indicator
+                  (starts with '^'); use '' if none.
+      breakdowns  true to apply BREAKDOWNS, false for the overall score only.
+    Also set the source table, the score field, the date field, and the base
+    encoded query for the set.
+
+
+-------------------------------------------------------------------------------
+4. DAILY VS MONTHLY
+-------------------------------------------------------------------------------
+
+Set GRANULARITY to 'daily' or 'monthly' at the top of either template.
+
+Scheduled template (one period per run):
+  daily   -> DAY_OFFSET selects the day (0 = today, -1 = yesterday).
+  monthly -> MONTH_OFFSET selects the month (0 = this month, -1 = last month).
+
+Backfill template (a range of periods):
+  daily   -> iterates each day from RANGE_START to RANGE_END (inclusive).
+  monthly -> iterates each month; only year and month are used, day ignored.
+
+The period start written onto the score is the day (daily) or the first of the
+month (monthly). The date window used in the query is 00:00:00 to 23:59:59 of
+that period. If your instance needs a timezone offset on those boundaries,
+adjust the times inside buildPeriod().
+
+
+-------------------------------------------------------------------------------
+5. RUNNING
+-------------------------------------------------------------------------------
+
+5.1 Recurring (PA_Median_Scheduled_Template.js)
+    Paste into a Scheduled Script Execution. Set its run frequency to match
+    GRANULARITY (run daily for daily, monthly for monthly). For a monthly run,
+    schedule it after the month closes and set MONTH_OFFSET = -1 if you want it
+    to score the month that just ended.
+
+5.2 Backfill (PA_Median_Backfill_Template.js)
+    Paste into a Background Script/Fix Script. Set GRANULARITY, RANGE_START and RANGE_END,
+    then run. Re-running a period overwrites its scores (upsert), so backfills
+    are safe to repeat. Large ranges can be slow; consider running in chunks.
+
+
+-------------------------------------------------------------------------------
+6. VERIFY RESULTS
+-------------------------------------------------------------------------------
+
+6.1 Dry run first. Before scheduling anything, run one period in a Background
+    Script and add a logSummary() call to see counts and medians per bucket
+    without trusting the dashboard yet. For example, inside runIndicator(),
+    after collect(): calc.logSummary(); then comment it out for production.
+
+6.2 Check the score table directly (pa_scores_l1 for the new model, or
+    pa_scores for legacy), filtered by your indicator, to confirm rows exist
+    with the expected start_at and value.
+
+6.3 Open PA Explorer / the scorecard for the indicator and confirm the overall
+    score and each breakdown show up. If the overall score shows but a breakdown
+    does not, recheck section 1.2, 1.3 and 3.1.
+
+
+-------------------------------------------------------------------------------
+7. DOCUMENTATION CONVENTION (do this so the next dev finds the code)
+-------------------------------------------------------------------------------
+
+In each indicator's Description field, record where its score comes from. For
+example:
+
+    Median scored by script. See:
+      Script Include:  PA_MedianScoreCalculator
+      Scheduled job:   <name of your Scheduled Script Execution>
+      Backfill script: <name/location of your Background Script>
+
+This single line saves the next person from reverse-engineering why an
+indicator has scores but no native data collection.
+
+
+-------------------------------------------------------------------------------
+8. COMMON GOTCHAS
+-------------------------------------------------------------------------------
+
+- Empty breakdown scores: the mapping label does not match an elements key, or
+  no mapping exists for that source table (records went to __unclassified__).
+- Score written but not visible: the indicator-to-breakdown association is
+  missing, or you are looking at the wrong score table for your model.
+- Indicator frequency mismatch: a monthly indicator scored with daily periods
+  (or the reverse) will not line up on the scorecard.
+- Truncated values: a direct numeric field read uses parseInt. Use a
+  scoreCalculator if you need decimals or a derived value.
+- Overwritten scores: native PA collection on the same indicator can overwrite
+  what this script writes. Disable the indicator's own collection.
+- Scoped-app write failures: see section 2.2.
