@@ -28,14 +28,15 @@ monthly cadence.
 
 ```
 .
-├── README.md
-├── LICENSE
-├── INSTRUCTIONS.txt                  Full setup, prerequisites, and gotchas
 ├── src/
 │   └── PA_MedianScoreCalculator.js   The Script Include
 └── templates/
     ├── PA_Median_Scheduled_Template.js   Recurring run (one period)
     └── PA_Median_Backfill_Template.js    Historical run (date range)
+├── INSTRUCTIONS.txt                  Full setup, prerequisites, and gotchas
+├── LICENSE
+├── README.md
+
 ```
 
 ## How it works
